@@ -14,7 +14,7 @@ st.set_page_config(page_title="QuantMath Terminal", layout="wide", page_icon="ðŸ
 try:
     if "API_URL" in st.secrets:
         # Remove trailing slash if present
-        base_url = st.secrets['API_URL'].rstrip('/')
+        base_url = st.secrets['https://quant-math-api.onrender.com'].rstrip('/')
         API_URL = f"{base_url}/analyze"
     else:
         # Default to Localhost
