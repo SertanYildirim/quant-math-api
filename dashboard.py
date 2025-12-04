@@ -13,9 +13,17 @@ st.set_page_config(page_title="QuantMath Terminal", layout="wide", page_icon="�
 # Secrets dosyasında "API_URL" anahtarını arıyoruz.
 try:
     if "API_URL" in st.secrets:
-        # Secrets'tan URL'yi al ve sonundaki / işaretini temizle
-        base_url = st.secrets["API_URL"].rstrip('/')
-        API_URL = f"{base_url}/analyze"
+        # 1. URL'yi al
+        raw_url = st.secrets["API_URL"]
+
+        # 2. Temizlik Operasyonu: Boşlukları, tek tırnakları (') ve çift tırnakları (") temizle
+        clean_url = raw_url.strip().strip('"').strip("'").rstrip('/')
+
+        # 3. Eğer başında http yoksa ekle (Garanti olsun)
+        if not clean_url.startswith("http"):
+            clean_url = f"https://{clean_url}"
+
+        API_URL = f"{clean_url}/analyze"
     else:
         # Secret yoksa Localhost'a dön
         st.warning("⚠️ 'API_URL' secret bulunamadı. Localhost kullanılıyor.")
