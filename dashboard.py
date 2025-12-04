@@ -1,18 +1,19 @@
 import streamlit as st
 import requests
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yfinance as yf
+import datetime
+import time
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="QuantMath Terminal", layout="wide", page_icon="📈")
 
 # --- API URL MANAGEMENT ---
-# Tries to load from Streamlit Secrets (Production), falls back to Localhost.
 try:
     if "API_URL" in st.secrets:
         raw_url = st.secrets["API_URL"]
-        # Clean up the URL string
         clean_url = raw_url.strip().strip('"').strip("'").rstrip('/')
 
         if not clean_url.startswith("http"):
@@ -20,7 +21,6 @@ try:
 
         BASE_URL = clean_url
     else:
-        # Default for Local Development
         BASE_URL = "http://127.0.0.1:8000"
 except Exception:
     BASE_URL = "http://127.0.0.1:8000"
@@ -40,9 +40,6 @@ st.markdown("---")
 
 # --- HELPER: WAKE UP SERVER ---
 def wake_up_server():
-    """
-    Sends a lightweight ping to the backend root to wake up Render free tier instances.
-    """
     try:
         requests.get(BASE_URL, timeout=1)
     except:
@@ -103,7 +100,6 @@ with st.sidebar:
 # --- MAIN PROCESS ---
 if st.session_state.get('run_analysis', False):
 
-    # Wake up server in background
     wake_up_server()
 
     with st.spinner(f"Fetching real-time data for {symbol}..."):
@@ -122,9 +118,15 @@ if st.session_state.get('run_analysis', False):
                 st.info("Tip: For crypto, ensure you add '-USD' (e.g., BTC-USD).")
                 st.stop()
 
-            # Backend SMA 200 check
-            if len(df) < 50:
-                st.warning(f"⚠️ Insufficient data ({len(df)} candles). Results might be inaccurate.")
+            # --- KRİTİK DÜZELTME ---
+            # Backend SMA 200 hesaplıyor, bu yüzden en az 200 mum ŞART.
+            # Eğer 200'den azsa, API'ye hiç gitmeden burada durduruyoruz.
+            if len(df) < 200:
+                st.warning(
+                    f"⚠️ Insufficient data ({len(df)} candles). Strategy requires at least 200 data points for SMA calculation.")
+                st.info(
+                    "👉 Please increase 'Data Period' (e.g., switch from 1d to 5d) or decrease 'Timeframe' (e.g., switch from 1h to 15m).")
+                st.stop()  # <--- BU KOMUT API HATASINI ENGELLER
 
             # Data Prep
             df = df.reset_index()
@@ -162,75 +164,83 @@ if st.session_state.get('run_analysis', False):
 
             # 2. SEND TO API
             try:
-                # Extended timeout for Render Cold Start
                 api_response = requests.post(API_URL, json=payload, timeout=50)
 
-                api_response.raise_for_status()
-                result = api_response.json()
+                # Sadece 200 OK dönerse işle, yoksa hatayı göster
+                if api_response.status_code == 200:
+                    result = api_response.json()
 
-                # --- DISPLAY RESULTS ---
-                sig = result['signal']
+                    # --- DISPLAY RESULTS ---
+                    sig = result['signal']
 
-                color_map = {
-                    "STRONG_BUY": "green", "BUY": "#90EE90",
-                    "NEUTRAL": "gray",
-                    "SELL": "#F08080", "STRONG_SELL": "red"
-                }
-                color = color_map.get(sig, "gray")
+                    color_map = {
+                        "STRONG_BUY": "green", "BUY": "#90EE90",
+                        "NEUTRAL": "gray",
+                        "SELL": "#F08080", "STRONG_SELL": "red"
+                    }
+                    color = color_map.get(sig, "gray")
 
-                # Metric Cards
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Asset", result['symbol'], f"{period_code} / {interval}")
-                c2.metric("Last Price", f"${result['last_price']:.2f}")
+                    # Metric Cards
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Asset", result['symbol'], f"{period_code} / {interval}")
+                    c2.metric("Last Price", f"${result['last_price']:.2f}")
 
-                # Safe access for indicators
-                rsi_val = result.get('indicators', {}).get('RSI', 0)
-                c3.metric("RSI (14)", rsi_val)
+                    rsi_val = result.get('indicators', {}).get('RSI', 0)
+                    c3.metric("RSI (14)", rsi_val)
 
-                c4.markdown(f"""
-                    <div style="text-align: center; border: 2px solid {color}; padding: 5px; border-radius: 10px; background-color: rgba(0,0,0,0.2);">
-                        <h3 style="color:{color}; margin:0; font-size: 1.2rem;">{sig}</h3>
-                        <small style="color: #ccc;">AI Signal</small>
-                    </div>
-                """, unsafe_allow_html=True)
+                    c4.markdown(f"""
+                        <div style="text-align: center; border: 2px solid {color}; padding: 5px; border-radius: 10px; background-color: rgba(0,0,0,0.2);">
+                            <h3 style="color:{color}; margin:0; font-size: 1.2rem;">{sig}</h3>
+                            <small style="color: #ccc;">AI Signal</small>
+                        </div>
+                    """, unsafe_allow_html=True)
 
-                st.markdown("---")
+                    st.markdown("---")
 
-                # CHARTING (Plotly)
-                st.subheader(f"📊 {symbol} Technical Analysis Chart")
+                    # CHARTING (Plotly)
+                    st.subheader(f"📊 {symbol} Technical Analysis Chart")
 
-                # Calculate Local Indicators for Visualization
-                df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
-                df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+                    # Calculate Local Indicators for Visualization
+                    df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+                    df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
 
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                    vertical_spacing=0.05,
-                                    row_heights=[0.7, 0.3])
+                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                        vertical_spacing=0.05,
+                                        row_heights=[0.7, 0.3])
 
-                # Candles
-                fig.add_trace(go.Candlestick(
-                    x=df[date_col], open=df['Open'], high=df['High'],
-                    low=df['Low'], close=df['Close'], name='Price'
-                ), row=1, col=1)
+                    # Candles
+                    fig.add_trace(go.Candlestick(
+                        x=df[date_col], open=df['Open'], high=df['High'],
+                        low=df['Low'], close=df['Close'], name='Price'
+                    ), row=1, col=1)
 
-                # EMAs
-                fig.add_trace(
-                    go.Scatter(x=df[date_col], y=df['EMA20'], line=dict(color='cyan', width=1), name='EMA 20'), row=1,
-                    col=1)
-                fig.add_trace(
-                    go.Scatter(x=df[date_col], y=df['EMA50'], line=dict(color='orange', width=1), name='EMA 50'), row=1,
-                    col=1)
+                    # EMAs
+                    fig.add_trace(
+                        go.Scatter(x=df[date_col], y=df['EMA20'], line=dict(color='cyan', width=1), name='EMA 20'),
+                        row=1, col=1)
+                    fig.add_trace(
+                        go.Scatter(x=df[date_col], y=df['EMA50'], line=dict(color='orange', width=1), name='EMA 50'),
+                        row=1, col=1)
 
-                # Volume
-                fig.add_trace(go.Bar(
-                    x=df[date_col], y=df['Volume'], marker_color='rgba(100, 100, 250, 0.5)', name='Volume'
-                ), row=2, col=1)
+                    # Volume
+                    fig.add_trace(go.Bar(
+                        x=df[date_col], y=df['Volume'], marker_color='rgba(100, 100, 250, 0.5)', name='Volume'
+                    ), row=2, col=1)
 
-                fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
-                st.plotly_chart(fig, use_container_width=True)
+                    fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
+                    st.plotly_chart(fig, use_container_width=True)
 
-                with st.expander("🔍 View Raw API Response"):
-                    st.json(result)
+                    with st.expander("🔍 View Raw API Response"):
+                        st.json(result)
+
+                else:
+                    # 400/500 hataları için kullanıcı dostu mesaj
+                    st.error(f"Backend Error ({api_response.status_code}):")
+                    try:
+                        err_json = api_response.json()
+                        st.code(err_json.get('detail', api_response.text))
+                    except:
+                        st.text(api_response.text)
 
             except requests.exceptions.ConnectionError:
                 st.error(f"❌ Connection Error! Could not reach `{API_URL}`")
@@ -244,4 +254,4 @@ if st.session_state.get('run_analysis', False):
             st.error(f"System Error: {e}")
 
 else:
-    st.info("👈 Select a symbol and click 'Analyze Market' to start.")
+    st.info("👈 Select a symbol from the left menu and click 'Analyze Market' to start.")
