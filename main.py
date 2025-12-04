@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -9,21 +9,19 @@ import numpy as np
 app = FastAPI(
     title="QuantMath API",
     description="Financial Technical Analysis & Signal Generator",
-    version="2.0.0"
+    version="2.1.0"
 )
 
-# --- CORS AYARLARI (Kritik!) ---
-# Bu ayar, Streamlit Cloud gibi dış kaynakların bu API'ye erişmesine izin verir.
+# CORS (Tüm kaynaklara açık)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Güvenlik için canlıda spesifik domain yazılabilir, şimdilik '*' (herkes)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# --- 1. Veri Modeli ---
 class Candle(BaseModel):
     timestamp: str
     open: float
@@ -39,48 +37,46 @@ class AnalysisRequest(BaseModel):
     data: List[Candle]
 
 
-# --- 2. Analiz Motoru ---
 def calculate_indicators(df: pd.DataFrame):
-    # RSI (14) - Seri döner
+    # RSI
     df['RSI'] = ta.rsi(df['close'], length=14)
 
-    # MACD - DataFrame dönebilir, sütunları birleştiriyoruz
+    # MACD
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     if macd is not None:
         df = pd.concat([df, macd], axis=1)
 
-    # Bollinger Bands
+    # Bollinger
     bbands = ta.bbands(df['close'], length=20, std=2)
     if bbands is not None:
         df = pd.concat([df, bbands], axis=1)
 
-    # SMA - Sadece Series olarak alıp ekliyoruz (Güvenli Yöntem)
+    # SMA
     sma50 = ta.sma(df['close'], length=50)
     df['SMA_50'] = sma50 if sma50 is not None else 0
 
-    sma200 = ta.sma(df['close'], length=200)
-    df['SMA_200'] = sma200 if sma200 is not None else 0
-
     return df.fillna(0)
 
-# --- 3. Sinyal Mantığı ---
+
 def generate_signal(row):
     score = 0
 
-    # RSI Sinyali
-    if row['RSI'] < 30:
-        score += 1  # Aşırı Satım -> Al
-    elif row['RSI'] > 70:
-        score -= 1  # Aşırı Alım -> Sat
+    # NaN kontrolü ve Float dönüşümü
+    rsi = float(row.get('RSI', 50))
+    close = float(row['close'])
+    sma50 = float(row.get('SMA_50', 0))
 
-    # Trend Sinyali (Fiyat SMA50 üstünde mi?)
-    if row['close'] > row['SMA_50']:
+    if rsi < 30:
         score += 1
-    elif row['close'] < row['SMA_50']:
+    elif rsi > 70:
         score -= 1
 
-    # MACD Sinyali (MACD > Sinyal ise Al)
-    # Sütun isimleri genellikle MACD_12_26_9 ve MACDs_12_26_9 olur
+    if close > sma50 and sma50 > 0:
+        score += 1
+    elif close < sma50 and sma50 > 0:
+        score -= 1
+
+    # MACD
     macd_col = 'MACD_12_26_9'
     signal_col = 'MACDs_12_26_9'
 
@@ -90,7 +86,6 @@ def generate_signal(row):
         elif row[macd_col] < row[signal_col]:
             score -= 0.5
 
-    # Karar
     if score >= 2:
         return "STRONG_BUY"
     elif score >= 1:
@@ -103,47 +98,34 @@ def generate_signal(row):
         return "NEUTRAL"
 
 
-# --- 4. Endpoint ---
 @app.post("/analyze")
 def analyze_market(request: AnalysisRequest):
     try:
-        # JSON listesini DataFrame'e çevir
         data_list = [c.dict() for c in request.data]
         df = pd.DataFrame(data_list)
 
         if len(df) < 20:
-            raise HTTPException(status_code=400, detail="Not enough data. Need at least 20 candles.")
+            raise HTTPException(status_code=400, detail="Not enough data.")
 
-        # Hesapla
         df = calculate_indicators(df)
-
-        # Son durumu al
         last_row = df.iloc[-1]
-        signal = generate_signal(last_row)
 
-        # MACD sütunlarını güvenli çek
-        macd_val = last_row.get('MACD_12_26_9', 0)
-        macd_signal = last_row.get('MACDs_12_26_9', 0)
-
-        return {
+        # Sonuçları JSON uyumlu hale getir (float() dönüşümü önemli)
+        result = {
             "symbol": request.symbol,
-            "last_price": last_row['close'],
-            "timestamp": last_row['timestamp'],
+            "last_price": float(last_row['close']),
+            "timestamp": str(last_row['timestamp']),
             "indicators": {
-                "RSI": round(last_row['RSI'], 2),
-                "MACD": round(macd_val, 4),
-                "MACD_Signal": round(macd_signal, 4),
-                "SMA_50": round(last_row['SMA_50'], 2),
-                "BB_Upper": round(last_row.get('BBU_20_2.0', 0), 2),
-                "BB_Lower": round(last_row.get('BBL_20_2.0', 0), 2),
+                "RSI": round(float(last_row.get('RSI', 0)), 2),
+                "MACD": round(float(last_row.get('MACD_12_26_9', 0)), 4),
+                "SMA_50": round(float(last_row.get('SMA_50', 0)), 2),
             },
-            "signal": signal,
-            "score": generate_signal(last_row)  # Skor mantığını göstermek için
+            "signal": generate_signal(last_row)
         }
+        return result
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        print(f"Server Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
