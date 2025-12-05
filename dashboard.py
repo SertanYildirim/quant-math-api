@@ -38,26 +38,31 @@ with col_logo:
     st.markdown("## ⚡")
 with col_title:
     st.title("QuantMath: Real-Time Algorithmic Trader")
-    st.caption(f"**Status:** 🟢 {status_msg if 'status_msg' in locals() else 'Active'}")
+    st.caption(f"**Status:** 🟢 Connected")
 
 st.markdown("---")
 
-# --- 🔑 GÜVENLİK AYARLARI ---
+# --- SECURITY HEADERS ---
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Content-Type": "application/json",
     "x-api-key": API_KEY 
 }
 
-# --- 1. BINANCE API (KRİPTO İÇİN - ÇOK HIZLI VE LİMİTSİZ) ---
-def get_binance_data(symbol, interval, limit=200):
+# --- 1. BINANCE API (CRYPTO) ---
+def get_binance_data(symbol, interval, period_code):
     """
-    Binance Public API kullanarak veri çeker. (API Key gerekmez)
+    Binance API'den periyoda uygun sayıda mum çeker.
     """
-    # Binance sembol formatı: BTC-USD -> BTCUSDT
     binance_symbol = symbol.replace("-", "").replace("USD", "USDT")
-    
     url = "https://api.binance.com/api/v3/klines"
+    
+    # Periyoda göre limit belirleme (Binance Max: 1000)
+    limit = 500 # Varsayılan
+    if period_code == "1d": limit = 100   # 1 Günlük veri yeter
+    elif period_code == "5d": limit = 500 
+    elif period_code == "1mo": limit = 1000 # Max alabileceğimizi alalım
+
     params = {
         "symbol": binance_symbol,
         "interval": interval,
@@ -69,26 +74,21 @@ def get_binance_data(symbol, interval, limit=200):
         response.raise_for_status()
         data = response.json()
         
-        # DataFrame oluştur
         df = pd.DataFrame(data, columns=[
             "Open Time", "Open", "High", "Low", "Close", "Volume",
             "Close Time", "Quote Asset Volume", "Number of Trades",
             "Taker Buy Base Asset Volume", "Taker Buy Quote Asset Volume", "Ignore"
         ])
         
-        # Tipleri düzelt
         df["Date"] = pd.to_datetime(df["Open Time"], unit="ms")
         numeric_cols = ["Open", "High", "Low", "Close", "Volume"]
         df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, axis=1)
-        
-        # Sütun adlarını standardize et
         return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         
-    except Exception as e:
-        # st.error(f"Binance Error: {e}")
+    except Exception:
         return None
 
-# --- 2. YAHOO FINANCE (HİSSE İÇİN - CACHED) ---
+# --- 2. YAHOO FINANCE (STOCKS/FOREX) ---
 @st.cache_data(ttl=600, show_spinner=False)
 def get_yahoo_data(symbol, period, interval):
     try:
@@ -99,23 +99,21 @@ def get_yahoo_data(symbol, period, interval):
     except:
         return None
 
-# --- 3. GENEL VERİ GETİRİCİ ---
+# --- 3. DATA ROUTER ---
 def get_market_data(asset_type, symbol, period, interval):
     if asset_type == "Crypto":
-        # Kripto için önce Binance dene (Hızlı), olmazsa Yahoo'ya düş
-        df = get_binance_data(symbol, interval, limit=300)
-        if df is not None and not df.empty:
-            return df
-        else:
+        df = get_binance_data(symbol, interval, period)
+        # Eğer Binance'de bulamazsa Yahoo'ya düş (Yedek)
+        if df is None or df.empty:
             return get_yahoo_data(symbol, period, interval)
+        return df
     else:
-        # Hisse/Forex için Yahoo kullan
         return get_yahoo_data(symbol, period, interval)
 
-# --- HELPER: API FETCH ---
+# --- HELPER: FETCH API ---
 def fetch_data(url, payload):
     try:
-        requests.get(BASE_URL, headers=BROWSER_HEADERS, timeout=2)
+        requests.get(BASE_URL, headers=BROWSER_HEADERS, timeout=2) # Wake up
     except: pass
 
     try:
@@ -132,25 +130,27 @@ with st.sidebar:
     asset_type = st.radio("Asset Type", ["Crypto", "Stocks", "Forex"], horizontal=True)
     
     if asset_type == "Crypto":
-        symbol = st.selectbox("Select Symbol", ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "AVAX-USD"])
+        symbol = st.selectbox("Select Symbol", ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "AVAX-USD", "DOGE-USD"])
     elif asset_type == "Stocks":
-        symbol = st.selectbox("Select Symbol", ["AAPL", "TSLA", "MSFT", "NVDA", "AMZN"])
+        symbol = st.selectbox("Select Symbol", ["AAPL", "TSLA", "MSFT", "NVDA", "AMZN", "GOOGL"])
     else:
-        symbol = st.selectbox("Select Symbol", ["EURUSD=X", "GBPUSD=X", "JPY=X"])
+        symbol = st.selectbox("Select Symbol", ["EURUSD=X", "GBPUSD=X", "JPY=X", "TRY=X", "GC=F"])
 
     st.markdown("---")
     
-    # Binance ve Yahoo interval formatları genelde uyumludur (15m, 1h, 1d)
-    interval = st.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
+    # ARTIK HERKES İÇİN AKTİF
+    period = st.selectbox("Data Period", ["1d (1 Day)", "5d (5 Days)", "1mo (1 Month)", "3mo (3 Months)", "1y (1 Year)"], index=2)
+    period_code = period.split(" ")[0]
     
-    # Period sadece Yahoo için geçerli, Binance limit kullanır
-    if asset_type != "Crypto":
-        period = st.selectbox("Data Period", ["1mo", "3mo", "1y"], index=0)
-        period_code = period.split(" ")[0]
-    else:
-        period_code = "N/A (Binance Limit)"
-
-    st.markdown("---")
+    # Akıllı Interval Seçimi
+    if period_code == "1d": valid_intervals = ["15m", "30m", "1h"]
+    elif period_code == "5d": valid_intervals = ["30m", "1h", "4h"] # 4h Binance destekler
+    elif period_code == "1mo": valid_intervals = ["1h", "4h", "1d"]
+    else: valid_intervals = ["1d", "1wk"]
+    
+    # Listede olmayan bir değer seçili kalmasın diye kontrol
+    default_ix = 0
+    interval = st.selectbox("Timeframe", valid_intervals, index=default_ix)
     
     if st.button("🚀 Analyze Market", type="primary"):
         st.session_state['run_analysis'] = True
@@ -160,21 +160,19 @@ if st.session_state.get('run_analysis', False):
     
     with st.spinner(f"Fetching data for {symbol}..."):
         
-        # Veriyi Çek
-        df = get_market_data(asset_type, symbol, period_code if asset_type != "Crypto" else None, interval)
+        df = get_market_data(asset_type, symbol, period_code, interval)
         
         if df is None or df.empty:
-            st.error(f"Data fetch failed for '{symbol}'. API Limits or Invalid Symbol.")
+            st.error(f"Data fetch failed for '{symbol}'.")
             st.stop()
 
         if len(df) < 50:
              st.warning("Insufficient data. Results might be inaccurate.")
 
-        # Tarih sütunu standardizasyonu (Binance 'Date', Yahoo 'Date' veya 'Datetime')
+        # Tarih sütunu standardizasyonu
         date_col = "Date" if "Date" in df.columns else "Datetime"
         df['timestamp_str'] = df[date_col].astype(str)
         
-        # Payload Hazırla
         candles = []
         for _, row in df.iterrows():
             candles.append({
@@ -184,7 +182,6 @@ if st.session_state.get('run_analysis', False):
         
         payload = {"symbol": symbol, "interval": interval, "data": candles}
         
-        # API'ye Gönder
         result = fetch_data(API_URL, payload)
         
         if result:
@@ -200,7 +197,6 @@ if st.session_state.get('run_analysis', False):
             st.markdown("---")
             st.subheader(f"📊 {symbol} Chart")
             
-            # Grafik
             df['EMA20'] = df['Close'].ewm(span=20).mean()
             df['EMA50'] = df['Close'].ewm(span=50).mean()
             
@@ -209,8 +205,19 @@ if st.session_state.get('run_analysis', False):
             fig.add_trace(go.Scatter(x=df[date_col], y=df['EMA20'], line=dict(color='cyan', width=1), name='EMA 20'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df[date_col], y=df['EMA50'], line=dict(color='orange', width=1), name='EMA 50'), row=1, col=1)
             fig.add_trace(go.Bar(x=df[date_col], y=df['Volume'], marker_color='rgba(100, 100, 250, 0.5)', name='Volume'), row=2, col=1)
-            fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
+            
+            # --- 📱 MOBİL İÇİN KRİTİK DÜZELTME ---
+            fig.update_layout(
+                height=600, 
+                xaxis_rangeslider_visible=False, 
+                template="plotly_dark", 
+                margin=dict(l=10, r=10, t=30, b=20), # Kenar boşluklarını azalttık (Mobil için iyi)
+                dragmode="pan", # Varsayılan olarak kaydırma modu (Box select değil)
+                legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
+            )
+            
+            # config={'scrollZoom': False}: Mobilde aşağı kaydırırken grafiğe takılmayı önler
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': False})
             
             with st.expander("🔍 API Response"): st.json(result)
         else:
