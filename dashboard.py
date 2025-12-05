@@ -110,7 +110,7 @@ def get_binance_data(symbol, interval, limit=1000):
     }
     
     try:
-        response = requests.get(url, params=params, timeout=5) # Timeout düşürüldü, hızlı fail etsin
+        response = requests.get(url, params=params, timeout=5) 
         response.raise_for_status()
         data = response.json()
         
@@ -127,7 +127,7 @@ def get_binance_data(symbol, interval, limit=1000):
         return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         
     except Exception as e:
-        print(f"Binance Fetch Error: {e}") # Loga yaz
+        print(f"Binance Fetch Error: {e}") 
         return None
 
 # --- 2. YAHOO FINANCE (STOCKS/FOREX + FALLBACK) ---
@@ -141,17 +141,17 @@ def get_yahoo_data(symbol, period, interval):
     except:
         return None
 
-# --- 3. DATA ROUTER (AKILLI SEÇİM) ---
+# --- 3. DATA ROUTER (DÜZELTİLDİ: UI Elemanı Kaldırıldı) ---
 @st.cache_data(ttl=300, show_spinner=False)
 def get_base_market_data(asset_type, symbol, period, base_interval):
     
     if asset_type == "Crypto":
-        # 1. Önce Binance'i dene (Hızlı & Limitsiz)
+        # 1. Önce Binance'i dene
         df = get_binance_data(symbol, base_interval, limit=1000)
         
-        # 2. Eğer Binance hata verirse (ABD Sunucusu/Blok), Yahoo'yu dene (Yedek)
+        # 2. Eğer Binance hata verirse Yahoo'ya düş
         if df is None or df.empty:
-            st.toast(f"Binance unreachable (Geo-block?), switching to Yahoo Finance for {symbol}", icon="⚠️")
+            # BURADAKİ 'st.toast' KALDIRILDI -> Cache Hatasını Çözen Yer
             return get_yahoo_data(symbol, period, base_interval)
             
         return df
@@ -219,17 +219,17 @@ with st.sidebar:
 # --- MAIN PROCESS ---
 if st.session_state.get('run_analysis', False):
     
-    source_name = "Market Data"
-    with st.spinner(f"Fetching high-res data ({fetch_interval}) for {symbol}..."):
+    source_name = "Binance API" if asset_type == "Crypto" else "Yahoo Finance"
+    with st.spinner(f"Fetching high-res data from {source_name}..."):
         
-        # VERİ ÇEKME (Otomatik Yedekli)
+        # 1. TABAN VERİ ÇEK
         df_base = get_base_market_data(asset_type, symbol, period_code, fetch_interval)
         
         if df_base is None or df_base.empty:
-            st.error(f"Data fetch failed for '{symbol}'. Both Binance and Yahoo APIs are unreachable.")
+            st.error(f"Data fetch failed for '{symbol}'.")
             st.stop()
 
-        # RESAMPLING
+        # 2. RESAMPLING
         if view_interval != fetch_interval:
             df = resample_market_data(df_base, view_interval)
             if df is None:
