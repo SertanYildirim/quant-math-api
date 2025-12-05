@@ -49,20 +49,45 @@ BROWSER_HEADERS = {
     "x-api-key": API_KEY 
 }
 
-# --- 1. BINANCE API (CRYPTO) ---
-def get_binance_data(symbol, interval, period_code):
+# --- HELPER: RESAMPLING ENGINE (YENİ) ---
+def resample_market_data(df, target_interval):
     """
-    Binance API'den periyoda uygun sayıda mum çeker.
+    Yüksek çözünürlüklü veriyi (örn: 15m) alıp, hedef periyoda (örn: 4h) dönüştürür.
+    """
+    if df is None or df.empty: return None
+    
+    # Pandas Resample Kuralları
+    rule_map = {
+        "15m": "15min", "30m": "30min", 
+        "1h": "1h", "90m": "90min", 
+        "4h": "4h", "1d": "1D", "1wk": "1W"
+    }
+    
+    rule = rule_map.get(target_interval)
+    if not rule: return df # Kural yoksa veya aynıysa orijinali dön
+    
+    # Tarih sütununu index yap (Resample için şart)
+    df_resampled = df.set_index("Date")
+    
+    # OHLCV Resampling Mantığı
+    df_resampled = df_resampled.resample(rule).agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Volume': 'sum'
+    }).dropna()
+    
+    return df_resampled.reset_index()
+
+# --- 1. BINANCE API (CRYPTO) ---
+def get_binance_data(symbol, interval, limit=1000):
+    """
+    Binance API'den veri çeker. 'interval' burada Base Fetch Interval'dır.
     """
     binance_symbol = symbol.replace("-", "").replace("USD", "USDT")
     url = "https://api.binance.com/api/v3/klines"
     
-    # Periyoda göre limit belirleme (Binance Max: 1000)
-    limit = 500 # Varsayılan
-    if period_code == "1d": limit = 100   # 1 Günlük veri yeter
-    elif period_code == "5d": limit = 500 
-    elif period_code == "1mo": limit = 1000 # Max alabileceğimizi alalım
-
     params = {
         "symbol": binance_symbol,
         "interval": interval,
@@ -89,7 +114,6 @@ def get_binance_data(symbol, interval, period_code):
         return None
 
 # --- 2. YAHOO FINANCE (STOCKS/FOREX) ---
-@st.cache_data(ttl=600, show_spinner=False)
 def get_yahoo_data(symbol, period, interval):
     try:
         ticker = yf.Ticker(symbol)
@@ -99,21 +123,23 @@ def get_yahoo_data(symbol, period, interval):
     except:
         return None
 
-# --- 3. DATA ROUTER ---
-def get_market_data(asset_type, symbol, period, interval):
+# --- 3. DATA CACHING & ROUTER ---
+# Bu fonksiyon artık her zaman 'base_interval' ile çalışır ve önbelleğe alır.
+@st.cache_data(ttl=600, show_spinner=False)
+def get_base_market_data(asset_type, symbol, period, base_interval):
     if asset_type == "Crypto":
-        df = get_binance_data(symbol, interval, period)
-        # Eğer Binance'de bulamazsa Yahoo'ya düş (Yedek)
+        # Kripto için limit artırıldı (1000 mum)
+        df = get_binance_data(symbol, base_interval, limit=1000)
         if df is None or df.empty:
-            return get_yahoo_data(symbol, period, interval)
+            return get_yahoo_data(symbol, period, base_interval)
         return df
     else:
-        return get_yahoo_data(symbol, period, interval)
+        return get_yahoo_data(symbol, period, base_interval)
 
-# --- HELPER: FETCH API ---
+# --- HELPER: API FETCH ---
 def fetch_data(url, payload):
     try:
-        requests.get(BASE_URL, headers=BROWSER_HEADERS, timeout=2) # Wake up
+        requests.get(BASE_URL, headers=BROWSER_HEADERS, timeout=2)
     except: pass
 
     try:
@@ -138,19 +164,35 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # ARTIK HERKES İÇİN AKTİF
-    period = st.selectbox("Data Period", ["1d (1 Day)", "5d (5 Days)", "1mo (1 Month)", "3mo (3 Months)", "1y (1 Year)"], index=2)
+    # Periyot Seçimi
+    period = st.selectbox(
+        "Data Period (Total History)", 
+        ["1d (1 Day)", "5d (5 Days)", "1mo (1 Month)", "3mo (3 Months)", "1y (1 Year)"], 
+        index=2
+    )
     period_code = period.split(" ")[0]
     
-    # Akıllı Interval Seçimi
-    if period_code == "1d": valid_intervals = ["15m", "30m", "1h"]
-    elif period_code == "5d": valid_intervals = ["30m", "1h", "4h"] # 4h Binance destekler
-    elif period_code == "1mo": valid_intervals = ["1h", "4h", "1d"]
-    else: valid_intervals = ["1d", "1wk"]
-    
-    # Listede olmayan bir değer seçili kalmasın diye kontrol
-    default_ix = 0
-    interval = st.selectbox("Timeframe", valid_intervals, index=default_ix)
+    # --- AKILLI FETCH MANTIĞI ---
+    # Periyoda göre en mantıklı "Taban Veri Aralığı"nı (Base Interval) belirliyoruz.
+    # Biz veriyi hep bu aralıkta çekip, sonra kullanıcının istediğine dönüştüreceğiz.
+    if period_code == "1d": 
+        fetch_interval = "1m"  # 1 günlük veri için 1 dakikalık çek
+        view_options = ["1m", "5m", "15m", "30m", "1h"]
+    elif period_code == "5d": 
+        fetch_interval = "5m"  # 5 gün için 5dk çek
+        view_options = ["5m", "15m", "30m", "1h"]
+    elif period_code == "1mo": 
+        fetch_interval = "15m" # 1 ay için 15dk çek
+        view_options = ["15m", "30m", "1h", "4h", "1d"]
+    elif period_code == "3mo": 
+        fetch_interval = "1h"
+        view_options = ["1h", "4h", "1d"]
+    else: 
+        fetch_interval = "1d"
+        view_options = ["1d", "1wk"]
+
+    # Kullanıcının görmek istediği aralık (View Interval)
+    view_interval = st.selectbox("Analysis Timeframe (View)", view_options, index=0)
     
     if st.button("🚀 Analyze Market", type="primary"):
         st.session_state['run_analysis'] = True
@@ -158,19 +200,37 @@ with st.sidebar:
 # --- MAIN PROCESS ---
 if st.session_state.get('run_analysis', False):
     
-    with st.spinner(f"Fetching data for {symbol}..."):
+    with st.spinner(f"Fetching high-res data ({fetch_interval}) for {symbol}..."):
         
-        df = get_market_data(asset_type, symbol, period_code, interval)
+        # 1. TABAN VERİYİ ÇEK (Önbellekli)
+        # Burası hep fetch_interval ile çalışır (Örn: 15m)
+        df_base = get_base_market_data(asset_type, symbol, period_code, fetch_interval)
         
-        if df is None or df.empty:
+        if df_base is None or df_base.empty:
             st.error(f"Data fetch failed for '{symbol}'.")
             st.stop()
 
-        if len(df) < 50:
-             st.warning("Insufficient data. Results might be inaccurate.")
+        # 2. RESAMPLING (Yeniden Örnekleme)
+        # Eğer kullanıcı taban veriden daha büyük bir aralık seçtiyse (Örn: 15m çekti ama 4h istiyor)
+        if view_interval != fetch_interval:
+            df = resample_market_data(df_base, view_interval)
+            st.toast(f"🔄 Data resampled from {fetch_interval} to {view_interval}", icon="ℹ️")
+        else:
+            df = df_base
 
-        # Tarih sütunu standardizasyonu
+        if len(df) < 30:
+             st.warning(f"Insufficient data points ({len(df)}) after resampling. Try a smaller timeframe.")
+        
+        # Veri Hazırlığı
+        # (Resample sonrası 'Date' index olabilir, resetleyelim)
+        if "Date" not in df.columns and isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+
         date_col = "Date" if "Date" in df.columns else "Datetime"
+        if date_col not in df.columns: # Hata koruması
+             st.error("Date column lost during processing.")
+             st.stop()
+
         df['timestamp_str'] = df[date_col].astype(str)
         
         candles = []
@@ -180,8 +240,9 @@ if st.session_state.get('run_analysis', False):
                 "open": row['Open'], "high": row['High'], "low": row['Low'], "close": row['Close'], "volume": row['Volume']
             })
         
-        payload = {"symbol": symbol, "interval": interval, "data": candles}
+        payload = {"symbol": symbol, "interval": view_interval, "data": candles}
         
+        # API'ye Gönder
         result = fetch_data(API_URL, payload)
         
         if result:
@@ -189,14 +250,15 @@ if st.session_state.get('run_analysis', False):
             color = {"STRONG_BUY": "green", "BUY": "#90EE90", "NEUTRAL": "gray", "SELL": "#F08080", "STRONG_SELL": "red"}.get(sig, "gray")
             
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Asset", result['symbol'])
+            c1.metric("Asset", result['symbol'], f"{period_code}")
             c2.metric("Last Price", f"${result['last_price']:.2f}")
             c3.metric("RSI (14)", result.get('indicators', {}).get('RSI', 0))
             c4.markdown(f"<div style='text-align:center; border:2px solid {color}; padding:5px; border-radius:10px;'><h3 style='color:{color}; margin:0;'>{sig}</h3></div>", unsafe_allow_html=True)
             
             st.markdown("---")
-            st.subheader(f"📊 {symbol} Chart")
+            st.subheader(f"📊 {symbol} Chart ({view_interval})")
             
+            # Grafik için lokal indikatörler
             df['EMA20'] = df['Close'].ewm(span=20).mean()
             df['EMA50'] = df['Close'].ewm(span=50).mean()
             
@@ -206,17 +268,12 @@ if st.session_state.get('run_analysis', False):
             fig.add_trace(go.Scatter(x=df[date_col], y=df['EMA50'], line=dict(color='orange', width=1), name='EMA 50'), row=1, col=1)
             fig.add_trace(go.Bar(x=df[date_col], y=df['Volume'], marker_color='rgba(100, 100, 250, 0.5)', name='Volume'), row=2, col=1)
             
-            # --- 📱 MOBİL İÇİN KRİTİK DÜZELTME ---
+            # Mobil Uyumlu Layout
             fig.update_layout(
-                height=600, 
-                xaxis_rangeslider_visible=False, 
-                template="plotly_dark", 
-                margin=dict(l=10, r=10, t=30, b=20), # Kenar boşluklarını azalttık (Mobil için iyi)
-                dragmode="pan", # Varsayılan olarak kaydırma modu (Box select değil)
+                height=600, xaxis_rangeslider_visible=False, template="plotly_dark", 
+                margin=dict(l=10, r=10, t=30, b=20), dragmode="pan", 
                 legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
             )
-            
-            # config={'scrollZoom': False}: Mobilde aşağı kaydırırken grafiğe takılmayı önler
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': False})
             
             with st.expander("🔍 API Response"): st.json(result)
