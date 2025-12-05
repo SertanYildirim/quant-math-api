@@ -11,7 +11,6 @@ import time
 st.set_page_config(page_title="QuantMath Terminal", layout="wide", page_icon="📈")
 
 # --- GÜVENLİ AYAR YÖNETİMİ (SECRETS) ---
-# GitHub'a atıldığında IP ve Şifre görünmez.
 try:
     if "API_URL" in st.secrets:
         raw_url = st.secrets["API_URL"]
@@ -20,13 +19,12 @@ try:
             clean_url = f"https://{clean_url}"
         BASE_URL = clean_url
     else:
-        BASE_URL = "http://127.0.0.1:8000" # GitHub'daki varsayılan (Güvenli)
+        BASE_URL = "http://127.0.0.1:8000" 
 
-    # API Anahtarını da Secrets'tan alıyoruz
     if "API_KEY" in st.secrets:
         API_KEY = st.secrets["API_KEY"]
     else:
-        API_KEY = "demo-key" # Varsayılan boş anahtar
+        API_KEY = "demo-key" 
 
 except Exception:
     BASE_URL = "http://127.0.0.1:8000"
@@ -40,7 +38,6 @@ with col_logo:
     st.markdown("## ⚡")
 with col_title:
     st.title("QuantMath: Real-Time Algorithmic Trader")
-    # URL'in tamamını göstermek yerine sadece durum gösterelim (Güvenlik)
     status_msg = "Cloud Connection" if "127.0.0.1" not in BASE_URL else "Local Connection"
     st.caption(f"**Status:** 🟢 {status_msg}")
 
@@ -50,14 +47,15 @@ st.markdown("---")
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Content-Type": "application/json",
-    "x-api-key": API_KEY  # <--- ARTIK SECRETS'TAN GELİYOR
+    "x-api-key": API_KEY 
 }
 
 # --- HELPER: WAKE UP SERVER ---
 def wake_up_server():
     try:
+        # Hata yakalama burada da önemli, header'da karakter sorunu varsa burası da patlayabilir
         requests.get(BASE_URL, headers=BROWSER_HEADERS, timeout=3)
-    except:
+    except (UnicodeEncodeError, Exception):
         pass 
 
 # --- HELPER: SMART FETCH DATA ---
@@ -74,6 +72,7 @@ def fetch_data(url, payload):
             else:
                 status_box.warning(f"⚠️ Sunucu yanıt vermedi, tekrar deneniyor ({attempt+1}/{max_retries})...")
 
+            # Şifreli Header'ı gönderiyoruz
             response = requests.post(url, json=payload, headers=BROWSER_HEADERS, timeout=60)
             
             # Yetki Hatası Kontrolü
@@ -88,6 +87,13 @@ def fetch_data(url, payload):
             response.raise_for_status()
             status_box.empty()
             return response.json()
+        
+        # ÖZEL HATA YAKALAMA: Türkçe Karakter Sorunu
+        except UnicodeEncodeError:
+            status_box.error("❌ KRİTİK HATA: API Anahtarınız geçersiz karakter içeriyor.")
+            st.error("HTTP başlıklarında Türkçe karakter (ı, ğ, ş, ü, ö, ç) kullanılamaz.")
+            st.info(f"Şu anki anahtarınız: '{API_KEY}' -> Lütfen bunu İngilizce karakterlerle (i, g, s...) değiştirin.")
+            st.stop()
             
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError, Exception) as e:
             time.sleep(2)
